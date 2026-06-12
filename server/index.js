@@ -221,7 +221,8 @@ function roomStateForPlayer(room, playerId) {
     canStart: room.phase === 'lobby' && room.players.length >= 2,
     canBeginRound: room.phase === 'preplay' && room.hostId === playerId && !room.game.washClaim,
     canToep:
-      room.phase === 'playing' && room.game.currentTurnId === playerId && !room.game.isBetting,
+      room.phase === 'playing' && room.game.currentTurnId === playerId && !room.game.isBetting &&
+      room.game.toeperId !== playerId,
     betting:
       room.game.isBetting && room.game.bettingOrder[room.game.bettingIndex] === playerId,
     bettingChoiceAvailable: room.game.isBetting,
@@ -490,6 +491,10 @@ function playCard(room, playerId, card) {
 function beginBetting(room, playerId) {
   if (room.phase !== 'playing' || room.game.isBetting) return { error: 'Kan nu niet toepen.' }
   if (room.game.currentTurnId !== playerId) return { error: 'Het is niet jouw beurt.' }
+  // Je mag niet twee keer achter elkaar toepen: pas weer nadat iemand anders heeft getoept.
+  if (room.game.toeperId === playerId) {
+    return { error: 'Je mag niet twee keer achter elkaar toepen — wacht tot iemand anders toept.' }
+  }
   const player = getPlayer(room, playerId)
   if (!player) return { error: 'Speler niet gevonden.' }
   const activePlayers = room.players.filter((p) => p.inRound && !p.passed && p.score < room.settings.maxPoints)
