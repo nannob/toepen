@@ -3,7 +3,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 const SUIT_ICONS = { harten: '♥', ruiten: '♦', klaveren: '♣', schoppen: '♠' }
 const SUIT_NAMES = { harten: 'Harten', ruiten: 'Ruiten', klaveren: 'Klaveren', schoppen: 'Schoppen' }
 const RED_SUITS = new Set(['harten', 'ruiten'])
-const RANK_NAMES = { '10': '10', '9': '9', '8': '8', '7': '7', A: 'Aas', H: 'Heer', V: 'Vrouw', B: 'Boer' }
+const RANK_NAMES = { '10': '10', '9': '9', '8': '8', '7': '7', A: 'Aas', H: 'Koning', V: 'Vrouw', B: 'Boer' }
+// Weergave op de kaart: Boer=J, Vrouw=Q, Heer=K.
+const RANK_DISPLAY = { '10': '10', '9': '9', '8': '8', '7': '7', A: 'A', H: 'K', V: 'Q', B: 'J' }
+const FACE_RANKS = ['B', 'V', 'H'] // plaatjes
 const ROOM_STORAGE = 'toepen-player'
 
 function messageColor(text) {
@@ -12,17 +15,51 @@ function messageColor(text) {
   return 'var(--text)'
 }
 
+// Gestileerde "plaatjes" voor Boer (J), Vrouw (Q) en Heer (K). Kleur volgt de suit.
+function FaceFigure({ rank }) {
+  if (rank === 'H') {
+    return (
+      <svg className="pc-figure" viewBox="0 0 100 100" aria-hidden="true">
+        <rect x="46" y="6" width="8" height="16" rx="2" />
+        <rect x="39" y="11" width="22" height="6" rx="2" />
+        <polygon points="18,78 18,38 34,54 50,26 66,54 82,38 82,78" />
+        <circle cx="18" cy="36" r="5" /><circle cx="50" cy="24" r="5" /><circle cx="82" cy="36" r="5" />
+        <rect x="16" y="74" width="68" height="9" rx="2" />
+      </svg>
+    )
+  }
+  if (rank === 'V') {
+    return (
+      <svg className="pc-figure" viewBox="0 0 100 100" aria-hidden="true">
+        <polygon points="23,77 23,45 38,57 50,33 62,57 77,45 77,77" />
+        <circle cx="23" cy="43" r="5" /><circle cx="50" cy="31" r="6" /><circle cx="77" cy="43" r="5" />
+        <circle cx="50" cy="61" r="5" />
+        <rect x="21" y="74" width="58" height="8" rx="2" />
+      </svg>
+    )
+  }
+  // Boer (J): fleur-de-lis
+  return (
+    <svg className="pc-figure" viewBox="0 0 100 100" aria-hidden="true">
+      <path d="M50 10 C61 33 83 35 66 57 C87 49 84 83 50 67 C16 83 13 49 34 57 C17 35 39 33 50 10 Z" />
+      <rect x="30" y="64" width="40" height="8" rx="4" />
+    </svg>
+  )
+}
+
 function CardFace({ card, size = 'md' }) {
   const red = RED_SUITS.has(card.suit)
+  const isFace = FACE_RANKS.includes(card.rank)
+  const display = RANK_DISPLAY[card.rank]
   return (
-    <span className={`playing-card ${size} ${red ? 'red' : 'black'}`} aria-label={`${RANK_NAMES[card.rank]} ${SUIT_NAMES[card.suit]}`}>
+    <span className={`playing-card ${size} ${red ? 'red' : 'black'} ${isFace ? 'face' : ''}`} aria-label={`${RANK_NAMES[card.rank]} ${SUIT_NAMES[card.suit]}`}>
       <span className="pc-corner pc-top">
-        <span className="pc-rank">{card.rank}</span>
+        <span className="pc-rank">{display}</span>
         <span className="pc-suit">{SUIT_ICONS[card.suit]}</span>
       </span>
-      <span className="pc-pip">{SUIT_ICONS[card.suit]}</span>
+      {isFace ? <FaceFigure rank={card.rank} /> : <span className="pc-pip">{SUIT_ICONS[card.suit]}</span>}
       <span className="pc-corner pc-bottom" aria-hidden="true">
-        <span className="pc-rank">{card.rank}</span>
+        <span className="pc-rank">{display}</span>
         <span className="pc-suit">{SUIT_ICONS[card.suit]}</span>
       </span>
     </span>
@@ -40,11 +77,15 @@ function App() {
   const [joinLink, setJoinLink] = useState('')
   const [copied, setCopied] = useState(false)
   const [showRules, setShowRules] = useState(false)
+  const [chatInput, setChatInput] = useState('')
+  const [effect, setEffect] = useState(null)
   const wsRef = useRef(null)
+  const chatEndRef = useRef(null)
   const reconnectRef = useRef(null)
+  const effectTimerRef = useRef(null)
   const closingRef = useRef(false)
   const credsRef = useRef({ code: '', id: '' })
-  const [settings, setSettings] = useState({ maxPoints: 15, maxStake: 4, houseArmoe: false, houseSwap: false, houseDirtyWash: false })
+  const [settings, setSettings] = useState({ maxPoints: 15, houseSwap: false, houseDirtyWash: true })
 
   useEffect(() => {
     const stored = window.localStorage.getItem(ROOM_STORAGE)
@@ -73,6 +114,10 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerId, joinCode])
 
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [roomState?.chat?.length])
+
   function savePlayer(code, id) {
     setPlayerId(id)
     setJoinCode(code)
@@ -98,6 +143,7 @@ function App() {
         const data = JSON.parse(event.data)
         if (data.type === 'state') setRoomState(data.payload)
         if (data.type === 'error') setError(data.message)
+        if (data.type === 'effect') showEffect(data.payload)
       } catch (e) {}
     })
     socket.addEventListener('close', () => {
@@ -157,6 +203,20 @@ function App() {
     wsRef.current.send(JSON.stringify({ type, payload }))
   }
 
+  function sendChat(event) {
+    if (event) event.preventDefault()
+    const text = chatInput.trim()
+    if (!text) return
+    sendAction('chat', { text })
+    setChatInput('')
+  }
+
+  function showEffect(payload) {
+    setEffect(payload)
+    if (effectTimerRef.current) clearTimeout(effectTimerRef.current)
+    effectTimerRef.current = setTimeout(() => setEffect(null), 2000)
+  }
+
   function leaveRoom() {
     closingRef.current = true
     if (reconnectRef.current) clearTimeout(reconnectRef.current)
@@ -197,6 +257,26 @@ function App() {
   const finishedTricks = roomState?.finishedTricks || []
   const isHost = roomState && roomState.hostId === roomState.yourId
   const hasLeadInHand = roomState?.leadSuit && sortedHand.some((c) => c.suit === roomState.leadSuit)
+  const isYourTurn = roomState && roomState.currentTurnId === roomState.yourId
+
+  let turnBanner = null
+  if (roomState) {
+    if (roomState.phase === 'preplay') {
+      turnBanner = roomState.washClaim
+        ? { mine: roomState.washRespond, text: `${roomState.washClaim.claimerName} claimt vuile was` }
+        : { mine: false, text: 'Vóór de ronde — claim eventueel vuile was. Host start de ronde.' }
+    } else if (roomState.phase === 'playing') {
+      if (roomState.betting) {
+        turnBanner = { mine: true, text: '✋ Jouw keuze: meegaan of passen?' }
+      } else if (roomState.bettingChoiceAvailable) {
+        turnBanner = { mine: false, text: `${currentPlayer?.name || 'Iemand'} kiest: meegaan of passen…` }
+      } else if (isYourTurn) {
+        turnBanner = { mine: true, text: '🎯 Jouw beurt — speel een kaart' }
+      } else {
+        turnBanner = { mine: false, text: `Aan de beurt: ${currentPlayer?.name || 'wachten'}` }
+      }
+    }
+  }
 
   return (
     <div className="app-shell">
@@ -214,9 +294,10 @@ function App() {
       {showRules && (
         <section className="card rules">
           <h2>Speluitleg</h2>
-          <p>Speel met 2-8 spelers. Je krijgt 4 kaarten en er worden 4 slagen gespeeld. De winnaar van de laatste slag wint de ronde.</p>
-          <p>Wie de ronde verliest, krijgt strafpunten gelijk aan de inzet. <strong>Toepen</strong> verhoogt de inzet met 1; anderen gaan mee of passen. Wie past, neemt de huidige inzet meteen als strafpunten.</p>
-          <p>Je moet kleur bekennen als je dat kunt. Wie eerst aan het ingestelde maximum strafpunten komt, ligt eruit.</p>
+          <p>Speel met 2-8 spelers. Je krijgt 4 kaarten en er worden 4 slagen gespeeld. De winnaar van de laatste slag wint de ronde. Je moet kleur bekennen als je dat kunt.</p>
+          <p>Iedereen begint op 0. Wie de ronde verliest, krijgt strafpunten gelijk aan de inzet. <strong>Toepen</strong> verhoogt de inzet met 1 (ook over jezelf heen); anderen gaan mee of passen. Wie past, neemt de huidige inzet meteen als strafpunten. Wie eerst aan het maximum komt, ligt eruit.</p>
+          <p><strong>Speciale handen:</strong> 4 dezelfde = direct gewonnen. <strong>Vuile was</strong> (een 7 + 3 plaatjes, of 4 plaatjes — J/Q/K) mag je claimen voor nieuwe kaarten; anderen mogen controleren. Klopt het → de controleur krijgt een strafpunt; was het bluf → jij speelt je kaarten en krijgt een strafpunt.</p>
+          <p><strong>Gimmicks:</strong> 4×10 = "op tafel". 3×10 = fluiten (🤫). Wordt de beslissende slag met een <strong>boer (J)</strong> gewonnen, dan zijn de strafpunten dubbel.</p>
         </section>
       )}
 
@@ -228,27 +309,17 @@ function App() {
               Je naam
               <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Bijv. Sanne" maxLength={20} />
             </label>
-            <div className="settings-row">
-              <label>
-                Max strafpunten
-                <select value={settings.maxPoints} onChange={(event) => setSettings((prev) => ({ ...prev, maxPoints: Number(event.target.value) }))}>
-                  <option value={10}>10</option>
-                  <option value={15}>15</option>
-                </select>
-              </label>
-              <label>
-                Max inzet
-                <select value={settings.maxStake} onChange={(event) => setSettings((prev) => ({ ...prev, maxStake: Number(event.target.value) }))}>
-                  <option value={2}>2</option>
-                  <option value={3}>3</option>
-                  <option value={4}>4</option>
-                </select>
-              </label>
-            </div>
+            <label>
+              Max strafpunten
+              <select value={settings.maxPoints} onChange={(event) => setSettings((prev) => ({ ...prev, maxPoints: Number(event.target.value) }))}>
+                <option value={10}>10</option>
+                <option value={15}>15</option>
+              </select>
+            </label>
             <div className="toggles">
-              <label><input type="checkbox" checked={settings.houseArmoe} onChange={(event) => setSettings((prev) => ({ ...prev, houseArmoe: event.target.checked }))} /> Vier gelijke – direct rondewinst</label>
+              <label><input type="checkbox" checked={settings.houseDirtyWash} onChange={(event) => setSettings((prev) => ({ ...prev, houseDirtyWash: event.target.checked }))} /> Vuile was (7 + 3 plaatjes of 4 plaatjes) — claimen &amp; controleren</label>
               <label><input type="checkbox" checked={settings.houseSwap} onChange={(event) => setSettings((prev) => ({ ...prev, houseSwap: event.target.checked }))} /> 3 gelijk + 1 afwijkend: verwissel één kaart</label>
-              <label><input type="checkbox" checked={settings.houseDirtyWash} onChange={(event) => setSettings((prev) => ({ ...prev, houseDirtyWash: event.target.checked }))} /> Vuile was: hele hand omruilen</label>
+              <p className="toggle-note">Vast: 4 dezelfde = direct gewonnen · 4×10 = op tafel · 3×10 = fluiten · beslissende slag met boer = dubbel.</p>
             </div>
             <button onClick={handleCreate} disabled={loading}>Maak kamer</button>
             <div className="divider">of</div>
@@ -288,6 +359,9 @@ function App() {
             </div>
 
             <div className="table-panel">
+              {turnBanner && (
+                <div className={`turn-banner ${turnBanner.mine ? 'mine' : ''}`}>{turnBanner.text}</div>
+              )}
               <div className="table-status">
                 <span className="chip">Beurt: <strong>{currentPlayer?.name || 'Wachten'}</strong></span>
                 <span className="chip">Inzet: <strong>{roomState.currentStake}</strong></span>
@@ -308,16 +382,27 @@ function App() {
                 </div>
                 {finishedTricks.length > 0 && (
                   <div className="trick-history">
-                    {finishedTricks.map((trick, index) => (
-                      <div key={index} className="finished-trick">
-                        <span className="ft-label">Slag {index + 1}</span>
-                        <span className="ft-cards">
-                          {trick.map((play) => (
-                            <CardFace key={`${play.playerId}-${play.card.rank}-${play.card.suit}`} card={play.card} size="xs" />
-                          ))}
-                        </span>
-                      </div>
-                    ))}
+                    {finishedTricks.map((trick, index) => {
+                      const plays = Array.isArray(trick) ? trick : (trick.plays || [])
+                      const winnerId = Array.isArray(trick) ? null : trick.winnerId
+                      return (
+                        <div key={index} className="finished-trick">
+                          <span className="ft-label">Slag {index + 1}</span>
+                          <span className="ft-cards">
+                            {plays.map((play) => {
+                              const pname = playerList.find((p) => p.id === play.playerId)?.name || '?'
+                              const won = play.playerId === winnerId
+                              return (
+                                <span key={`${play.playerId}-${play.card.rank}-${play.card.suit}`} className={`ft-play ${won ? 'won' : ''}`}>
+                                  <CardFace card={play.card} size="xs" />
+                                  <small>{won ? '🏆 ' : ''}{pname}</small>
+                                </span>
+                              )
+                            })}
+                          </span>
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
               </div>
@@ -330,11 +415,29 @@ function App() {
                 )}
 
                 {roomState.phase === 'preplay' && (
-                  <div className="button-row">
-                    {roomState.canSwap && <button className="secondary" onClick={() => sendAction('swapCard')}>Wissel kaart</button>}
-                    {roomState.canDirtyWash && <button className="secondary" onClick={() => sendAction('dirtyWash')}>Vuile was</button>}
-                    {roomState.canBeginRound && <button onClick={() => sendAction('beginRound')}>Begin de ronde</button>}
-                    {!roomState.canBeginRound && !roomState.canSwap && !roomState.canDirtyWash && <p className="muted-note">Wachten op huisregel-keuzes…</p>}
+                  <div className="preplay-actions">
+                    {roomState.washClaim ? (
+                      <div className="wash-claim">
+                        <p><strong>{roomState.washClaim.claimerName}</strong> claimt vuile was. Geloof je het, of controleer je?</p>
+                        {roomState.washRespond ? (
+                          <div className="button-row">
+                            <button className="ghost danger" onClick={() => sendAction('washRespond', { choice: 'check' })}>Controleer</button>
+                            <button className="secondary" onClick={() => sendAction('washRespond', { choice: 'believe' })}>Geloof het</button>
+                          </div>
+                        ) : roomState.washClaim.claimerId === roomState.yourId ? (
+                          <p className="muted-note">Wachten of iemand controleert…</p>
+                        ) : (
+                          <p className="muted-note">Iemand anders mag nu controleren…</p>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="button-row">
+                        {roomState.canSwap && <button className="secondary" onClick={() => sendAction('swapCard')}>Wissel kaart</button>}
+                        {roomState.canClaimWash && <button className="secondary" onClick={() => sendAction('claimWash')}>Vuile was claimen</button>}
+                        {roomState.canBeginRound && <button onClick={() => sendAction('beginRound')}>Begin de ronde</button>}
+                        {!isHost && <p className="muted-note">Claim eventueel vuile was. Host start de ronde.</p>}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -367,7 +470,10 @@ function App() {
 
             {roomState.phase !== 'lobby' && (
               <div className="hand-panel">
-                <h3>Jouw hand</h3>
+                <div className="hand-head">
+                  <h3>Jouw hand</h3>
+                  {roomState.canFluiten && <button className="fluit-btn" onClick={() => sendAction('fluiten')}>Fluiten 🤫</button>}
+                </div>
                 {hasLeadInHand && roomState.canPlay && <p className="muted-note">Je moet {SUIT_NAMES[roomState.leadSuit]} bekennen.</p>}
                 <div className="hand-grid">
                   {sortedHand.length === 0 && <p className="muted-note">Geen kaarten meer.</p>}
@@ -388,6 +494,30 @@ function App() {
               </div>
             )}
 
+            <section className="chat-panel">
+              <h3>Chat</h3>
+              <div className="chat-list">
+                {(roomState.chat || []).length === 0 && <p className="muted-note">Nog geen berichten. Zeg hallo! 👋</p>}
+                {(roomState.chat || []).map((msg) => (
+                  <div key={msg.id} className={`chat-msg ${msg.playerId === roomState.yourId ? 'mine' : ''}`}>
+                    <span className="chat-name">{msg.name}</span>
+                    <span className="chat-text">{msg.text}</span>
+                  </div>
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+              <form className="chat-form" onSubmit={sendChat}>
+                <input
+                  value={chatInput}
+                  onChange={(event) => setChatInput(event.target.value)}
+                  placeholder="Typ een bericht…"
+                  maxLength={240}
+                  aria-label="Chatbericht"
+                />
+                <button type="submit" className="ghost" disabled={!chatInput.trim()}>Stuur</button>
+              </form>
+            </section>
+
             <section className="log-panel">
               <h3>Laatste gebeurtenissen</h3>
               <div className="log-list">
@@ -404,6 +534,22 @@ function App() {
         {error && <div className="toast error" onClick={() => setError(null)}>{error}</div>}
         {loading && <div className="toast">Bezig…</div>}
       </main>
+
+      {effect && (
+        <div className={`effect-overlay ${effect.kind}`} aria-live="assertive">
+          {effect.kind === 'fluiten' ? (
+            <div className="effect-card">
+              <div className="effect-icon">🤫</div>
+              <p>{effect.name} fluit — even stil!</p>
+            </div>
+          ) : (
+            <div className="effect-card">
+              <div className="effect-icon">🍆</div>
+              <p>{effect.name}: vier tienen — op tafel!</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

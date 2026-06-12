@@ -13,6 +13,20 @@ const SUITS = ['harten', 'ruiten', 'klaveren', 'schoppen']
 const RANKS = ['10', '9', '8', '7', 'A', 'H', 'V', 'B']
 const RANK_ORDER = { '10': 8, '9': 7, '8': 6, '7': 5, A: 4, H: 3, V: 2, B: 1 }
 const SUIT_ICONS = { harten: '♥', ruiten: '♦', klaveren: '♣', schoppen: '♠' }
+// Weergave: Boer=J, Vrouw=Q, Heer=K (intern blijven de codes B/V/H).
+const RANK_LABELS = { '10': '10', '9': '9', '8': '8', '7': '7', A: 'A', H: 'K', V: 'Q', B: 'J' }
+// Plaatjes = J, Q, K (Boer, Vrouw, Heer). Aas en 10 tellen NIET als plaatje.
+const FACE_RANKS = ['B', 'V', 'H']
+
+function countRank(hand, rank) {
+  return hand.filter((card) => card.rank === rank).length
+}
+
+function isVuileWasHand(hand) {
+  const faceCount = hand.filter((card) => FACE_RANKS.includes(card.rank)).length
+  const hasSeven = hand.some((card) => card.rank === '7')
+  return faceCount === 4 || (faceCount === 3 && hasSeven)
+}
 
 app.set('trust proxy', 1)
 app.use(express.json({ limit: '32kb' }))
@@ -54,7 +68,7 @@ function makeDeck() {
   const deck = []
   for (const suit of SUITS) {
     for (const rank of RANKS) {
-      deck.push({ suit, rank, label: rank + SUIT_ICONS[suit], order: RANK_ORDER[rank] })
+      deck.push({ suit, rank, label: RANK_LABELS[rank] + SUIT_ICONS[suit], order: RANK_ORDER[rank] })
     }
   }
   return deck
@@ -78,14 +92,14 @@ function createRoom(name, settings) {
     players: [player],
     settings: {
       maxPoints: clamp(settings.maxPoints, 5, 100, 15),
-      maxStake: clamp(settings.maxStake, 2, 10, 4),
-      houseArmoe: !!settings.houseArmoe,
+      // Vuile was staat standaard AAN (alleen uit als expliciet false meegestuurd).
       houseSwap: !!settings.houseSwap,
-      houseDirtyWash: !!settings.houseDirtyWash
+      houseDirtyWash: settings.houseDirtyWash === undefined ? true : !!settings.houseDirtyWash
     },
     phase: 'lobby',
     roundNumber: 0,
     logs: [],
+    chat: [],
     game: {
       dealerIndex: -1,
       currentTurnId: null,
@@ -97,7 +111,8 @@ function createRoom(name, settings) {
       bettingIndex: 0,
       trick: [],
       finishedTricks: [],
-      drawPile: []
+      drawPile: [],
+      washClaim: null
     }
   }
   rooms.set(code, room)
@@ -126,15 +141,29 @@ function createPlayer(name) {
     passed: false,
     swapped: false,
     dirtyWashUsed: false,
+    washResolved: false,
     eligibleArmoe: false,
     eligibleSwap: false,
     eligibleDirtyWash: false,
+    eligibleFluiten: false,
+    fourRank: null,
     connected: true
   }
 }
 
 function sanitizeName(name) {
   return String(name || '').trim().slice(0, 20)
+}
+
+function sanitizeChat(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 240)
+}
+
+function pushChat(room, player, text) {
+  const message = sanitizeChat(text)
+  if (!message) return
+  room.chat.push({ id: makeId(), playerId: player.id, name: player.name, text: message, time: Date.now() })
+  if (room.chat.length > 60) room.chat = room.chat.slice(-60)
 }
 
 function getRoom(code) {
@@ -186,11 +215,11 @@ function roomStateForPlayer(room, playerId) {
     finishedTricks: room.game.finishedTricks,
     roundNumber: room.roundNumber,
     logs: room.logs,
+    chat: room.chat,
     settings: room.settings,
     maxPoints: room.settings.maxPoints,
-    maxStake: room.settings.maxStake,
     canStart: room.phase === 'lobby' && room.players.length >= 2,
-    canBeginRound: room.phase === 'preplay' && room.hostId === playerId,
+    canBeginRound: room.phase === 'preplay' && room.hostId === playerId && !room.game.washClaim,
     canToep:
       room.phase === 'playing' && room.game.currentTurnId === playerId && !room.game.isBetting,
     betting:
@@ -198,8 +227,15 @@ function roomStateForPlayer(room, playerId) {
     bettingChoiceAvailable: room.game.isBetting,
     canSwap:
       room.phase === 'preplay' && player && player.eligibleSwap && !player.swapped,
-    canDirtyWash:
-      room.phase === 'preplay' && player && player.eligibleDirtyWash && !player.dirtyWashUsed,
+    canClaimWash:
+      room.phase === 'preplay' && room.settings.houseDirtyWash && !room.game.washClaim &&
+      player && player.score < room.settings.maxPoints && !player.washResolved,
+    washClaim: room.game.washClaim
+      ? { claimerId: room.game.washClaim.claimerId, claimerName: getPlayer(room, room.game.washClaim.claimerId)?.name }
+      : null,
+    washRespond: !!(room.game.washClaim && room.game.washClaim.responders[room.game.washClaim.index] === playerId),
+    canFluiten:
+      player && (room.phase === 'preplay' || room.phase === 'playing') && countRank(player.hand, '10') === 3,
     canPlay:
       room.phase === 'playing' && room.game.currentTurnId === playerId && !room.game.isBetting,
     gameOver: room.phase === 'game-over',
@@ -218,24 +254,32 @@ function broadcastRoom(room) {
 }
 
 function setHostIfNeeded(room) {
-  if (!room.players.some((p) => p.id === room.hostId && p.ws && p.ws.readyState === WebSocket.OPEN)) {
-    const connected = room.players.find((p) => p.ws && p.ws.readyState === WebSocket.OPEN)
-    if (connected) {
-      room.hostId = connected.id
-      log(room, `${connected.name} is nu host geworden.`)
-    }
+  // De kamermaker blijft host, ook bij een tijdelijke disconnect (spelers worden
+  // niet uit de room verwijderd). Alleen als de host echt niet meer bestaat,
+  // dragen we het host-schap over aan een andere speler.
+  const hostExists = room.players.some((p) => p.id === room.hostId)
+  if (hostExists) return
+  const fallback = room.players.find((p) => p.ws && p.ws.readyState === WebSocket.OPEN) || room.players[0]
+  if (fallback) {
+    room.hostId = fallback.id
+    log(room, `${fallback.name} is nu host.`)
   }
 }
 
 function applyHouseRules(room) {
   room.players.forEach((player) => {
-    const ranks = player.hand.map((card) => card.rank)
-    const sameRankGroups = RANKS.map((rank) => ranks.filter((r) => r === rank).length)
-    player.eligibleArmoe = room.settings.houseArmoe && sameRankGroups.some((count) => count === 4)
-    player.eligibleSwap = room.settings.houseSwap && sameRankGroups.some((count) => count === 3)
-    const faceCount = player.hand.filter((card) => ['10', 'A', 'H', 'V'].includes(card.rank)).length
-    const hasSeven = player.hand.some((card) => card.rank === '7')
-    player.eligibleDirtyWash = room.settings.houseDirtyWash && (faceCount === 4 || (faceCount === 3 && hasSeven))
+    const counts = {}
+    RANKS.forEach((rank) => { counts[rank] = countRank(player.hand, rank) })
+    const fourRank = RANKS.find((rank) => counts[rank] === 4) || null
+    // 4 dezelfde = altijd directe rondewinst (geen instelling).
+    player.eligibleArmoe = !!fourRank
+    player.fourRank = fourRank
+    player.eligibleSwap = room.settings.houseSwap && RANKS.some((rank) => counts[rank] === 3)
+    // eligibleDirtyWash = of de hand ÉCHT vuile was is (voor de controle/bluf).
+    player.eligibleDirtyWash = isVuileWasHand(player.hand)
+    // 3 tienen = fluiten (gimmick).
+    player.eligibleFluiten = counts['10'] === 3
+    player.washResolved = false
   })
 }
 
@@ -287,7 +331,8 @@ function startRound(room) {
     finishedTricks: [],
     drawPile: deck,
     roundHasStarted: false,
-    trickNumber: 0
+    trickNumber: 0,
+    washClaim: null
   }
 
   room.roundNumber += 1
@@ -306,39 +351,48 @@ function startRound(room) {
   const armoeWinner = room.players.find((player) => player.eligibleArmoe)
   if (armoeWinner) {
     room.phase = 'playing'
-    log(room, `Vier gelijke voor ${armoeWinner.name}! Directe rondewinst.`)
+    if (armoeWinner.fourRank === '10') {
+      // 4 tienen = "op tafel"-gimmick.
+      log(room, `Vier tienen voor ${armoeWinner.name}! Op tafel — en directe rondewinst.`)
+      broadcastEffect(room, { kind: 'tafel', name: armoeWinner.name })
+    } else {
+      log(room, `Vier gelijke voor ${armoeWinner.name}! Directe rondewinst.`)
+    }
     finishRound(room, armoeWinner.id, true)
     return
   }
 
-  // Als iemand een huisregel-keuze mag maken (wisselen of vuile was), gaan we
-  // eerst naar de preplay-fase. Anders begint het spelen meteen.
-  const needsPreplay = room.players.some(
-    (player) => player.eligibleSwap || player.eligibleDirtyWash
-  )
+  // Met vuile was aan kun je elke ronde (bluf)claimen, dus gaan we altijd eerst
+  // naar de preplay-fase. Zonder vuile was alleen als iemand mag wisselen.
+  const needsPreplay = room.settings.houseDirtyWash || room.players.some((player) => player.eligibleSwap)
   room.phase = needsPreplay ? 'preplay' : 'playing'
   if (needsPreplay) {
-    log(room, 'Huisregel-keuzes: wisselen of vuile was. Host start de ronde.')
+    log(room, 'Vóór de ronde: vuile was claimen of wisselen kan nu. Host start de ronde.')
   }
 }
 
 function beginPlay(room) {
   if (room.phase !== 'preplay') return { error: 'De ronde is al begonnen.' }
+  if (room.game.washClaim) return { error: 'Eerst de vuile-was-controle afronden.' }
   room.phase = 'playing'
   log(room, 'De ronde begint.')
   broadcastRoom(room)
   return { ok: true }
 }
 
-function finishRound(room, winnerId, directWin) {
+function finishRound(room, winnerId, directWin, multiplier = 1) {
   const winner = getPlayer(room, winnerId)
   if (!winner) return
   const activePlayers = room.players.filter((player) => player.inRound && !player.passed && player.score < room.settings.maxPoints)
   const losers = activePlayers.filter((player) => player.id !== winnerId)
+  const penalty = room.game.currentStake * multiplier
 
+  if (multiplier > 1) {
+    log(room, 'Beslissende slag met een boer — dubbele strafpunten!')
+  }
   if (losers.length > 0) {
     losers.forEach((player) => {
-      player.score += room.game.currentStake
+      player.score += penalty
     })
   }
 
@@ -346,7 +400,7 @@ function finishRound(room, winnerId, directWin) {
   room.winnerId = winnerId
   log(room, `${winner.name} wint de ronde.`)
   if (losers.length > 0 && !directWin) {
-    log(room, `${losers.map((player) => `${player.name} +${room.game.currentStake}`).join(', ')}`)
+    log(room, `${losers.map((player) => `${player.name} +${penalty}`).join(', ')}`)
   }
 
   const deadPlayers = room.players.filter((player) => player.score >= room.settings.maxPoints)
@@ -413,7 +467,7 @@ function playCard(room, playerId, card) {
 
   const winnerPlay = determineTrickWinner(room.game.trick)
   const winner = getPlayer(room, winnerPlay.playerId)
-  room.game.finishedTricks.push(room.game.trick)
+  room.game.finishedTricks.push({ plays: room.game.trick, winnerId: winner.id })
   room.game.trick = []
   room.game.leadSuit = null
   room.game.currentTurnId = winner.id
@@ -422,7 +476,9 @@ function playCard(room, playerId, card) {
 
   const unfinishedPlayers = room.players.filter((p) => p.inRound && !p.passed && p.score < room.settings.maxPoints)
   if (unfinishedPlayers.length <= 1 || room.game.trickNumber >= 4) {
-    finishRound(room, winner.id, false)
+    // Beslissende slag gewonnen met een boer (J) => dubbele strafpunten.
+    const decidedByBoer = winnerPlay.card.rank === 'B'
+    finishRound(room, winner.id, false, decidedByBoer ? 2 : 1)
     broadcastRoom(room)
     return { ok: true }
   }
@@ -439,7 +495,7 @@ function beginBetting(room, playerId) {
   const activePlayers = room.players.filter((p) => p.inRound && !p.passed && p.score < room.settings.maxPoints)
   if (activePlayers.length < 2) return { error: 'Niet genoeg spelers voor toep.' }
 
-  room.game.currentStake = Math.min(room.game.currentStake + 1, room.settings.maxStake)
+  room.game.currentStake = room.game.currentStake + 1
   room.game.toeperId = player.id
   room.game.isBetting = true
   room.game.bettingOrder = activePlayers
@@ -519,20 +575,100 @@ function swapCard(room, playerId) {
   return { ok: true }
 }
 
-function dirtyWash(room, playerId) {
-  if (room.phase !== 'preplay') return { error: 'Niet mogelijk na de start.' }
-  const player = getPlayer(room, playerId)
-  if (!player || !player.eligibleDirtyWash || player.dirtyWashUsed) return { error: 'Geen vuile was beschikbaar.' }
-  if (room.game.drawPile.length < 4) return { error: 'Niet genoeg kaarten in de stapel.' }
+function broadcastEffect(room, effect) {
+  room.players.forEach((player) => {
+    if (player.ws && player.ws.readyState === WebSocket.OPEN) {
+      send(player.ws, { type: 'effect', payload: { id: makeId(), ...effect } })
+    }
+  })
+}
 
-  const newCards = []
-  for (let i = 0; i < 4; i += 1) {
-    newCards.push(room.game.drawPile.pop())
+function grantNewHand(room, player) {
+  if (room.game.drawPile.length < 4) {
+    log(room, 'Stapel is leeg — geen nieuwe kaarten meer beschikbaar.')
+    return false
   }
+  const newCards = []
+  for (let i = 0; i < 4; i += 1) newCards.push(room.game.drawPile.pop())
   player.hand = newCards
   player.dirtyWashUsed = true
-  log(room, `${player.name} gebruikt vuile was en krijgt een nieuwe hand.`)
+  return true
+}
+
+// Een speler claimt vuile was (mag bluffen). Anderen mogen controleren.
+function claimWash(room, playerId) {
+  if (room.phase !== 'preplay') return { error: 'Vuile was kan alleen vóór de ronde.' }
+  if (!room.settings.houseDirtyWash) return { error: 'Vuile was staat uit in deze kamer.' }
+  if (room.game.washClaim) return { error: 'Er loopt al een vuile-was-controle.' }
+  const player = getPlayer(room, playerId)
+  if (!player || player.score >= room.settings.maxPoints) return { error: 'Je kunt nu niet claimen.' }
+  if (player.washResolved) return { error: 'Je hebt je vuile was al gehad deze ronde.' }
+
+  const responders = room.players
+    .filter((p) => p.id !== playerId && p.score < room.settings.maxPoints)
+    .map((p) => p.id)
+
+  if (responders.length === 0) {
+    grantNewHand(room, player)
+    player.washResolved = true
+    log(room, `${player.name} claimt vuile was en krijgt nieuwe kaarten.`)
+    broadcastRoom(room)
+    return { ok: true }
+  }
+
+  room.game.washClaim = { claimerId: playerId, responders, index: 0 }
+  log(room, `${player.name} claimt vuile was. Wie controleert?`)
   broadcastRoom(room)
+  return { ok: true }
+}
+
+function respondWash(room, playerId, choice) {
+  const wc = room.game.washClaim
+  if (!wc) return { error: 'Er is geen vuile-was-controle.' }
+  if (wc.responders[wc.index] !== playerId) return { error: 'Het is niet jouw beurt om te reageren.' }
+  const claimer = getPlayer(room, wc.claimerId)
+  const responder = getPlayer(room, playerId)
+  if (!claimer || !responder) return { error: 'Speler niet gevonden.' }
+
+  if (choice === 'check') {
+    const truth = isVuileWasHand(claimer.hand)
+    if (truth) {
+      responder.score += 1
+      grantNewHand(room, claimer)
+      log(room, `${responder.name} controleert — het wás vuile was! ${responder.name} +1 strafpunt, ${claimer.name} krijgt nieuwe kaarten.`)
+    } else {
+      claimer.score += 1
+      log(room, `${responder.name} controleert — bluf! ${claimer.name} speelt met deze kaarten en krijgt +1 strafpunt.`)
+    }
+    claimer.washResolved = true
+    room.game.washClaim = null
+    broadcastRoom(room)
+    return { ok: true }
+  }
+
+  if (choice === 'believe') {
+    wc.index += 1
+    if (wc.index >= wc.responders.length) {
+      grantNewHand(room, claimer)
+      claimer.washResolved = true
+      room.game.washClaim = null
+      log(room, `Iedereen gelooft ${claimer.name} — nieuwe kaarten, geen controle.`)
+    } else {
+      log(room, `${responder.name} gelooft het.`)
+    }
+    broadcastRoom(room)
+    return { ok: true }
+  }
+
+  return { error: 'Ongeldige keuze.' }
+}
+
+function fluiten(room, playerId) {
+  const player = getPlayer(room, playerId)
+  if (!player) return { error: 'Speler niet gevonden.' }
+  if (countRank(player.hand, '10') !== 3) return { error: 'Je hebt geen drie tienen.' }
+  log(room, `${player.name} fluit! 🤫`)
+  broadcastEffect(room, { kind: 'fluiten', name: player.name })
   return { ok: true }
 }
 
@@ -645,6 +781,11 @@ wss.on('connection', (ws, req) => {
         broadcastRoom(room)
         return
       }
+      if (type === 'chat') {
+        pushChat(room, player, payload && payload.text)
+        broadcastRoom(room)
+        return
+      }
       if (type === 'beginRound') {
         if (player.id !== room.hostId) return send(ws, { type: 'error', message: 'Alleen de host kan de ronde starten.' })
         const result = beginPlay(room)
@@ -671,8 +812,18 @@ wss.on('connection', (ws, req) => {
         if (result.error) return send(ws, { type: 'error', message: result.error })
         return
       }
-      if (type === 'dirtyWash') {
-        const result = dirtyWash(room, player.id)
+      if (type === 'claimWash') {
+        const result = claimWash(room, player.id)
+        if (result.error) return send(ws, { type: 'error', message: result.error })
+        return
+      }
+      if (type === 'washRespond') {
+        const result = respondWash(room, player.id, payload && payload.choice)
+        if (result.error) return send(ws, { type: 'error', message: result.error })
+        return
+      }
+      if (type === 'fluiten') {
+        const result = fluiten(room, player.id)
         if (result.error) return send(ws, { type: 'error', message: result.error })
         return
       }
@@ -691,10 +842,11 @@ wss.on('connection', (ws, req) => {
           p.passed = false
           p.swapped = false
           p.dirtyWashUsed = false
+          p.washResolved = false
         })
         room.phase = 'lobby'
         room.roundNumber = 0
-        room.game = { dealerIndex: 0, currentTurnId: null, leadSuit: null, currentStake: 1, isBetting: false, toeperId: null, bettingOrder: [], bettingIndex: 0, trick: [], finishedTricks: [], drawPile: [] }
+        room.game = { dealerIndex: 0, currentTurnId: null, leadSuit: null, currentStake: 1, isBetting: false, toeperId: null, bettingOrder: [], bettingIndex: 0, trick: [], finishedTricks: [], drawPile: [], washClaim: null }
         log(room, 'Revanche gestart. Iedereen begint opnieuw bij 0 strafpunten.')
         broadcastRoom(room)
         return
