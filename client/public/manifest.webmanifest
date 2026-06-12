@@ -1,0 +1,18 @@
+{
+  "name": "Toepen",
+  "short_name": "Toepen",
+  "description": "Online multiplayer Toepen, zonder account.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

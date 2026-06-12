@@ -1,0 +1,22 @@
+{
+  "name": "toepen",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Online multiplayer Toepen game",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "serve": "npm run build && npm run start"
+  },
+  "dependencies": {
+    "express": "^4.18.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.13.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.2.0",
+    "vite": "^5.4.1"
+  }
+}

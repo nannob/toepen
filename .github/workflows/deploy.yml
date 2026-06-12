@@ -1,0 +1,59 @@
+name: Deploy Toepen
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # Upload alleen wat de server nodig heeft (frontend zit in dist/).
+      - name: Upload bestanden naar server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASS }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          source: "server/*,dist/*,package.json,package-lock.json"
+          target: "~/toepen"
+          overwrite: true
+          rm: false
+
+      - name: Installeren en (her)starten met pm2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASS }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -e
+            export PATH="$HOME/.npm-global/bin:$PATH"
+            cd ~/toepen
+            npm ci --omit=dev || npm install --omit=dev
+            command -v pm2 >/dev/null 2>&1 || npm install -g pm2
+            export PORT="${{ secrets.APP_PORT }}"
+            export ALLOWED_ORIGINS="${{ secrets.ALLOWED_ORIGINS }}"
+            pm2 delete toepen >/dev/null 2>&1 || true
+            PORT="${PORT:-4173}" ALLOWED_ORIGINS="$ALLOWED_ORIGINS" pm2 start server/index.js --name toepen --update-env
+            pm2 save
