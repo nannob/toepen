@@ -42,24 +42,26 @@ via *Run workflow*). Host en user staan hardcoded (`159.69.211.153`, `root`). De
 4. zet een nginx reverse proxy op poort 80 → Node op `127.0.0.1:4173` (met WebSocket-upgrade),
 5. (her)start de app met pm2 onder de naam `toepen`.
 
-### Benodigde GitHub secret
+### Benodigde GitHub secrets
 - `SSH_PASS` – het root-wachtwoord van de VPS. (Verplicht.)
+- `CERTBOT_EMAIL` – optioneel; e-mail voor Let's Encrypt-meldingen (anders zonder e-mail).
 - `ALLOWED_ORIGINS` – optioneel; komma-gescheiden origin-allowlist voor de WebSocket,
   bijv. `https://toepenmet.nanno.nu`.
 
 Zet deze onder **Settings → Secrets and variables → Actions**, push naar `main`, en de
 eerste run richt de hele server in.
 
-### Domein + HTTPS
+### Domein + HTTPS (automatisch)
 1. Wijs in je DNS een **A-record** van `toepenmet.nanno.nu` naar `159.69.211.153`.
-2. Regel daarna eenmalig een TLS-certificaat op de VPS:
-   ```bash
-   apt-get install -y certbot python3-certbot-nginx
-   certbot --nginx -d toepenmet.nanno.nu
-   ```
-   Omdat de client `wss://` afleidt uit `https://`, werkt de WebSocket daarna automatisch.
-3. Optioneel: zet `ALLOWED_ORIGINS=https://toepenmet.nanno.nu` als secret voor strakkere
+2. Verder niets handmatigs: de deploy installeert certbot en zet bij **elke** run het
+   TLS-certificaat (her) in nginx, inclusief HTTP→HTTPS-redirect. Zo blijft HTTPS staan,
+   ook na een nieuwe deploy. De certbot-stap faalt stil als DNS nog niet wijst of poort
+   80 dicht is — zodra dat klopt, pakt de volgende run het certificaat op.
+3. Omdat de client `wss://` afleidt uit `https://`, werkt de WebSocket automatisch mee.
+4. Optioneel: zet `ALLOWED_ORIGINS=https://toepenmet.nanno.nu` als secret voor strakkere
    WebSocket-beveiliging.
+
+> Zorg dat poort **443** open staat (zie Firewall hieronder), anders is HTTPS niet bereikbaar.
 
 ### Firewall
 Open de benodigde poorten op de VPS:

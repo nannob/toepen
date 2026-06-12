@@ -61,17 +61,23 @@ jobs:
               apt-get install -y nodejs
             fi
 
-            # pm2 en nginx installeren als ze ontbreken
+            DOMAIN="toepenmet.nanno.nu"
+
+            # pm2, nginx en certbot installeren als ze ontbreken
             command -v pm2 >/dev/null 2>&1 || npm install -g pm2
             if ! command -v nginx >/dev/null 2>&1; then
               apt-get update
               apt-get install -y nginx
             fi
+            if ! command -v certbot >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y certbot python3-certbot-nginx
+            fi
 
             cd ${{ env.APP_DIR }}
             npm ci --omit=dev || npm install --omit=dev
 
-            # nginx reverse proxy (HTTP -> Node, met WebSocket-upgrade)
+            # Basis nginx reverse proxy (HTTP). certbot voegt hierna HTTPS/443 toe.
             cat > /etc/nginx/sites-available/toepen <<'NGINX'
             server {
               listen 80;
@@ -92,6 +98,17 @@ jobs:
             ln -sf /etc/nginx/sites-available/toepen /etc/nginx/sites-enabled/toepen
             rm -f /etc/nginx/sites-enabled/default
             nginx -t && systemctl reload nginx
+
+            # HTTPS automatisch (her)stellen. Idempotent: vernieuwt niet onnodig,
+            # maar zet na elke deploy het 443/SSL-blok terug in de nginx-config.
+            # Faalt stil als DNS nog niet wijst of poort 80/443 dicht is.
+            EMAIL="${{ secrets.CERTBOT_EMAIL }}"
+            if [ -n "$EMAIL" ]; then
+              certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect --keep-until-expiring || echo "certbot overgeslagen (DNS/poort 80 nog niet klaar?)"
+            else
+              certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect --keep-until-expiring || echo "certbot overgeslagen (DNS/poort 80 nog niet klaar?)"
+            fi
+            nginx -t && systemctl reload nginx || true
 
             # App (her)starten met pm2
             pm2 delete toepen >/dev/null 2>&1 || true
