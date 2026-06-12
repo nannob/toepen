@@ -1,13 +1,22 @@
-name: Deploy Toepen
+name: Deploy Toepen (VPS)
 
+# Deployt de volledige Node-app (Express + WebSocket) naar de VPS.
+# Vereiste GitHub secret: SSH_PASS (root-wachtwoord van de VPS).
+# Host en user staan hieronder hardcoded.
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
+
+env:
+  DEPLOY_HOST: 159.69.211.153
+  DEPLOY_USER: root
+  APP_DIR: /opt/toepen
+  APP_PORT: '4173'
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -24,36 +33,68 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # Upload alleen wat de server nodig heeft (frontend zit in dist/).
-      - name: Upload bestanden naar server
+      - name: Upload bestanden naar VPS
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
+          host: ${{ env.DEPLOY_HOST }}
+          username: ${{ env.DEPLOY_USER }}
           password: ${{ secrets.SSH_PASS }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
+          port: 22
           source: "server/*,dist/*,package.json,package-lock.json"
-          target: "~/toepen"
+          target: ${{ env.APP_DIR }}
           overwrite: true
-          rm: false
 
-      - name: Installeren en (her)starten met pm2
+      - name: Installeren, nginx instellen en (her)starten
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
+          host: ${{ env.DEPLOY_HOST }}
+          username: ${{ env.DEPLOY_USER }}
           password: ${{ secrets.SSH_PASS }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
+          port: 22
           script: |
             set -e
-            export PATH="$HOME/.npm-global/bin:$PATH"
-            cd ~/toepen
-            npm ci --omit=dev || npm install --omit=dev
+            export DEBIAN_FRONTEND=noninteractive
+
+            # Node 20 installeren als het ontbreekt
+            if ! command -v node >/dev/null 2>&1; then
+              curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+              apt-get install -y nodejs
+            fi
+
+            # pm2 en nginx installeren als ze ontbreken
             command -v pm2 >/dev/null 2>&1 || npm install -g pm2
-            export PORT="${{ secrets.APP_PORT }}"
-            export ALLOWED_ORIGINS="${{ secrets.ALLOWED_ORIGINS }}"
+            if ! command -v nginx >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y nginx
+            fi
+
+            cd ${{ env.APP_DIR }}
+            npm ci --omit=dev || npm install --omit=dev
+
+            # nginx reverse proxy (HTTP -> Node, met WebSocket-upgrade)
+            cat > /etc/nginx/sites-available/toepen <<'NGINX'
+            server {
+              listen 80;
+              server_name 159.69.211.153 toepenmet.nanno.nu;
+
+              location / {
+                proxy_pass http://127.0.0.1:4173;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_set_header Host $host;
+                proxy_set_header X-Forwarded-For $remote_addr;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 3600s;
+              }
+            }
+            NGINX
+            ln -sf /etc/nginx/sites-available/toepen /etc/nginx/sites-enabled/toepen
+            rm -f /etc/nginx/sites-enabled/default
+            nginx -t && systemctl reload nginx
+
+            # App (her)starten met pm2
             pm2 delete toepen >/dev/null 2>&1 || true
-            PORT="${PORT:-4173}" ALLOWED_ORIGINS="$ALLOWED_ORIGINS" pm2 start server/index.js --name toepen --update-env
+            PORT=${{ env.APP_PORT }} ALLOWED_ORIGINS="${{ secrets.ALLOWED_ORIGINS }}" pm2 start server/index.js --name toepen --update-env
             pm2 save
+            pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
