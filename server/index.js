@@ -509,7 +509,8 @@ function playCard(room, playerId, card) {
 
   const winnerPlay = determineTrickWinner(room.game.trick)
   const winner = getPlayer(room, winnerPlay.playerId)
-  room.game.finishedTricks.push({ plays: room.game.trick, winnerId: winner.id })
+  const completedTrick = room.game.trick
+  room.game.finishedTricks.push({ plays: completedTrick, winnerId: winner.id })
   room.game.trick = []
   room.game.leadSuit = null
   room.game.currentTurnId = winner.id
@@ -518,9 +519,9 @@ function playCard(room, playerId, card) {
 
   const unfinishedPlayers = room.players.filter((p) => p.inRound && !p.passed && p.score < room.settings.maxPoints)
   if (unfinishedPlayers.length <= 1 || room.game.trickNumber >= 4) {
-    // Beslissende slag gewonnen met een boer (J) => dubbele strafpunten.
-    const decidedByBoer = winnerPlay.card.rank === 'B'
-    finishRound(room, winner.id, false, decidedByBoer ? 2 : 1)
+    // Boer (J) in de beslissende slag (door wie dan ook gespeeld) => dubbele strafpunten.
+    const boerInTrick = completedTrick.some((play) => play.card.rank === 'B')
+    finishRound(room, winner.id, false, boerInTrick ? 2 : 1)
     broadcastRoom(room)
     return { ok: true }
   }

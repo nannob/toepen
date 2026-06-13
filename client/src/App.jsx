@@ -337,7 +337,7 @@ function App() {
           <p>Speel met 2-8 spelers. Je krijgt 4 kaarten en er worden 4 slagen gespeeld. De winnaar van de laatste slag wint de ronde. Je moet kleur bekennen als je dat kunt.</p>
           <p>Iedereen begint op 0. Wie de ronde verliest, krijgt strafpunten gelijk aan de inzet. <strong>Toepen</strong> verhoogt de inzet met 1 (ook over jezelf heen); anderen gaan mee of passen. Wie past, neemt de huidige inzet meteen als strafpunten. Wie eerst aan het maximum komt, ligt eruit.</p>
           <p><strong>Speciale handen:</strong> 4 dezelfde = direct gewonnen. <strong>Vuile was</strong> (4 plaatjes, of 3 plaatjes + een 7 — plaatjes = J/Q/K én Aas) mag je claimen voor nieuwe kaarten; anderen mogen controleren. Klopt het → de controleur krijgt een strafpunt; was het bluf → jij speelt je kaarten en krijgt een strafpunt.</p>
-          <p><strong>Gimmicks:</strong> 4×10 = "op tafel". 3×10 = fluiten (🤫). Wordt de beslissende slag met een <strong>boer (J)</strong> gewonnen, dan zijn de strafpunten dubbel.</p>
+          <p><strong>Gimmicks:</strong> 4×10 = "op tafel". 3×10 = fluiten (🤫). Ligt er in de beslissende (laatste) slag een <strong>boer (J)</strong> — door wie dan ook gespeeld — dan zijn de strafpunten dubbel.</p>
         </section>
       )}
 
@@ -359,7 +359,7 @@ function App() {
             <div className="toggles">
               <label><input type="checkbox" checked={settings.houseDirtyWash} onChange={(event) => setSettings((prev) => ({ ...prev, houseDirtyWash: event.target.checked }))} /> Vuile was (4 plaatjes, of 3 + een 7; plaatjes = J/Q/K en Aas) — claimen &amp; controleren</label>
               <label><input type="checkbox" checked={settings.houseSwap} onChange={(event) => setSettings((prev) => ({ ...prev, houseSwap: event.target.checked }))} /> 3 gelijk + 1 afwijkend: verwissel één kaart</label>
-              <p className="toggle-note">Vast: 4 dezelfde = direct gewonnen · 4×10 = op tafel · 3×10 = fluiten · beslissende slag met boer = dubbel.</p>
+              <p className="toggle-note">Vast: 4 dezelfde = direct gewonnen · 4×10 = op tafel · 3×10 = fluiten · boer in de laatste slag = dubbel.</p>
             </div>
             <button onClick={handleCreate} disabled={loading}>Maak kamer</button>
             <div className="divider">of</div>
