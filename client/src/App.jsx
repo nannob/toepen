@@ -150,6 +150,16 @@ function App() {
     socket.addEventListener('message', (event) => {
       try {
         const data = JSON.parse(event.data)
+        if (data.type === 'superseded') {
+          // Deze sessie is elders overgenomen. Alleen pauzeren als dit nog onze
+          // actuele socket is (niet bij ons eigen socket-vervangen).
+          if (wsRef.current === socket) {
+            closingRef.current = true
+            if (reconnectRef.current) clearTimeout(reconnectRef.current)
+            setError('Deze kamer is in een ander venster/apparaat geopend; deze sessie is gepauzeerd. Ververs om hier verder te gaan.')
+          }
+          return
+        }
         if (data.type === 'state') setRoomState(data.payload)
         if (data.type === 'error') setError(data.message)
         if (data.type === 'effect') showEffect(data.payload)
@@ -167,6 +177,10 @@ function App() {
       } catch (e) {}
     })
     socket.addEventListener('close', () => {
+      // Alleen de actuele socket mag een reconnect plannen. Een socket die we
+      // zelf hebben vervangen (wsRef wijst al naar een nieuwe) negeert z'n close,
+      // anders ontstaat een reconnect-lus die elkaar steeds wegsluit.
+      if (wsRef.current !== socket) return
       setConnected(false)
       if (closingRef.current) return
       const { code: c, id: i } = credsRef.current
@@ -174,7 +188,10 @@ function App() {
         reconnectRef.current = setTimeout(() => connectSocket(c, i), 1500)
       }
     })
-    socket.addEventListener('error', () => setError('Verbinding kwijt, opnieuw verbinden…'))
+    socket.addEventListener('error', () => {
+      if (wsRef.current !== socket) return
+      setError('Verbinding kwijt, opnieuw verbinden…')
+    })
     wsRef.current = socket
   }
 

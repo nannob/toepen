@@ -209,7 +209,7 @@ function roomStateForPlayer(room, playerId) {
       id: p.id,
       name: p.name,
       score: p.score,
-      connected: !!p.ws,
+      connected: !!p.connected,
       inRound: p.inRound,
       passed: p.passed,
       isHost: p.id === room.hostId,
@@ -874,13 +874,15 @@ wss.on('connection', (ws, req) => {
         const player = getPlayer(room, String(playerId || '').trim())
         if (!player) return send(ws, { type: 'error', message: 'Iemand met deze speler-ID bestaat niet in de kamer.' })
         if (player.ws && player.ws !== ws) {
-          try { player.ws.close() } catch (e) {}
+          try { send(player.ws, { type: 'superseded' }); player.ws.close() } catch (e) {}
         }
+        if (player.disconnectTimer) { clearTimeout(player.disconnectTimer); player.disconnectTimer = null }
+        const wasOffline = !player.connected
         player.ws = ws
         player.connected = true
         attached = { room, player }
         setHostIfNeeded(room)
-        log(room, `${player.name} is verbonden.`)
+        if (wasOffline) log(room, `${player.name} is er weer.`)
         broadcastRoom(room)
         return
       }
@@ -980,13 +982,23 @@ wss.on('connection', (ws, req) => {
   })
 
   ws.on('close', () => {
-    if (attached) {
-      attached.player.connected = false
-      attached.player.ws = null
-      log(attached.room, `${attached.player.name} is verbroken.`)
-      setHostIfNeeded(attached.room)
-      broadcastRoom(attached.room)
-    }
+    if (!attached) return
+    const { room, player } = attached
+    // Alleen reageren als dit nog de actieve socket van de speler is.
+    if (player.ws && player.ws !== ws) return
+    player.ws = null
+    // Grace-periode: pas na een paar seconden als 'weg' melden. Korte onderbrekingen
+    // (herverbinden, netwerkhik) geven zo geen offline/online-geflikker meer.
+    if (player.disconnectTimer) clearTimeout(player.disconnectTimer)
+    player.disconnectTimer = setTimeout(() => {
+      player.disconnectTimer = null
+      if (!player.ws) {
+        player.connected = false
+        log(room, `${player.name} is weg.`)
+        setHostIfNeeded(room)
+        broadcastRoom(room)
+      }
+    }, 5000)
   })
 })
 
