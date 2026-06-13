@@ -15,15 +15,16 @@ const RANK_ORDER = { '10': 8, '9': 7, '8': 6, '7': 5, A: 4, H: 3, V: 2, B: 1 }
 const SUIT_ICONS = { harten: '♥', ruiten: '♦', klaveren: '♣', schoppen: '♠' }
 // Weergave: Boer=J, Vrouw=Q, Heer=K (intern blijven de codes B/V/H).
 const RANK_LABELS = { '10': '10', '9': '9', '8': '8', '7': '7', A: 'A', H: 'K', V: 'Q', B: 'J' }
-// Plaatjes = J, Q, K (Boer, Vrouw, Heer). Aas en 10 tellen NIET als plaatje.
-const FACE_RANKS = ['B', 'V', 'H']
+// Plaatjes voor vuile was = Boer, Vrouw, Heer én Aas (J, Q, K, A). De 10 telt niet.
+const PLAATJE_RANKS = ['B', 'V', 'H', 'A']
 
 function countRank(hand, rank) {
   return hand.filter((card) => card.rank === rank).length
 }
 
+// Vuile was = 4 plaatjes, of 3 plaatjes + een 7.
 function isVuileWasHand(hand) {
-  const faceCount = hand.filter((card) => FACE_RANKS.includes(card.rank)).length
+  const faceCount = hand.filter((card) => PLAATJE_RANKS.includes(card.rank)).length
   const hasSeven = hand.some((card) => card.rank === '7')
   return faceCount === 4 || (faceCount === 3 && hasSeven)
 }
@@ -36,6 +37,7 @@ const rooms = new Map()
 
 const ROOM_TTL_MS = 6 * 60 * 60 * 1000 // verwijder rooms na 6 uur inactiviteit
 const MAX_ROOMS = 2000
+const WASH_TIMEOUT_MS = 10 * 1000 // controleur heeft 10s om te kiezen
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((value) => value.trim())
@@ -187,16 +189,34 @@ function log(room, message) {
 
 function roomStateForPlayer(room, playerId) {
   const player = getPlayer(room, playerId)
-  const others = room.players.map((p) => ({
-    id: p.id,
-    name: p.name,
-    score: p.score,
-    connected: !!p.ws,
-    inRound: p.inRound,
-    passed: p.passed,
-    isHost: p.id === room.hostId,
-    eliminated: p.score >= room.settings.maxPoints
-  }))
+  const others = room.players.map((p) => {
+    const eliminated = p.score >= room.settings.maxPoints
+    // Status tijdens een ronde: wie gaat mee, wie niet, wie moet nog kiezen.
+    let status = null
+    if (!eliminated && (room.phase === 'playing' || room.game.isBetting)) {
+      if (p.passed) {
+        status = 'uit'
+      } else if (room.game.isBetting) {
+        if (p.id === room.game.toeperId) {
+          status = 'toept'
+        } else {
+          const pos = room.game.bettingOrder.indexOf(p.id)
+          status = pos !== -1 && pos >= room.game.bettingIndex ? 'wacht' : 'mee'
+        }
+      }
+    }
+    return {
+      id: p.id,
+      name: p.name,
+      score: p.score,
+      connected: !!p.ws,
+      inRound: p.inRound,
+      passed: p.passed,
+      isHost: p.id === room.hostId,
+      eliminated,
+      status
+    }
+  })
 
   const turnPlayer = room.players.find((p) => p.id === room.game.currentTurnId)
   return {
@@ -230,11 +250,19 @@ function roomStateForPlayer(room, playerId) {
       room.phase === 'preplay' && player && player.eligibleSwap && !player.swapped,
     canClaimWash:
       room.phase === 'preplay' && room.settings.houseDirtyWash && !room.game.washClaim &&
-      player && player.score < room.settings.maxPoints && !player.washResolved,
+      player && player.score < room.settings.maxPoints && room.game.drawPile.length >= 4,
     washClaim: room.game.washClaim
-      ? { claimerId: room.game.washClaim.claimerId, claimerName: getPlayer(room, room.game.washClaim.claimerId)?.name }
+      ? {
+          claimerId: room.game.washClaim.claimerId,
+          claimerName: getPlayer(room, room.game.washClaim.claimerId)?.name,
+          deadline: room.game.washClaim.deadline || null
+        }
       : null,
-    washRespond: !!(room.game.washClaim && room.game.washClaim.responders[room.game.washClaim.index] === playerId),
+    washRespond: !!(
+      room.game.washClaim &&
+      room.game.washClaim.others.includes(playerId) &&
+      !room.game.washClaim.believers.includes(playerId)
+    ),
     canFluiten:
       player && (room.phase === 'preplay' || room.phase === 'playing') && countRank(player.hand, '10') === 3,
     canPlay:
@@ -319,11 +347,17 @@ function startRound(room) {
     player.eligibleSwap = false
     player.eligibleDirtyWash = false
   })
+  // De winnaar van de vorige ronde "schudt" (is dealer); de speler ná de winnaar begint.
+  const prevDealer = typeof room.game.dealerIndex === 'number' ? room.game.dealerIndex : -1
+  const winnerIdx = room.winnerId ? room.players.findIndex((p) => p.id === room.winnerId) : -1
+  const dealerIndex = winnerIdx !== -1 ? winnerIdx : (prevDealer >= 0 ? (prevDealer + 1) % room.players.length : 0)
+
   room.game = {
-    dealerIndex: typeof room.game.dealerIndex === 'number' ? (room.game.dealerIndex + 1) % room.players.length : 0,
+    dealerIndex,
     currentTurnId: null,
     leadSuit: null,
     currentStake: 1,
+    passPenalty: 1,
     isBetting: false,
     toeperId: null,
     bettingOrder: [],
@@ -337,17 +371,24 @@ function startRound(room) {
   }
 
   room.roundNumber += 1
-  const nextDealerIndex = room.game.dealerIndex
-  const nextLeadIndex = room.players.findIndex(
-    (player, index) => index === (nextDealerIndex + 1) % room.players.length && player.score < room.settings.maxPoints
-  )
+  // Eerste actieve speler ná de dealer begint.
+  let nextLeadIndex = -1
+  for (let off = 1; off <= room.players.length; off += 1) {
+    const i = (dealerIndex + off) % room.players.length
+    if (room.players[i].score < room.settings.maxPoints) { nextLeadIndex = i; break }
+  }
   const startingPlayer = room.players[nextLeadIndex] || room.players.find((player) => player.score < room.settings.maxPoints)
   room.game.currentTurnId = startingPlayer.id
   room.game.startingPlayerId = startingPlayer.id
 
   applyHouseRules(room)
 
-  log(room, `Ronde ${room.roundNumber} gestart. ${startingPlayer.name} begint.`)
+  const dealer = room.players[dealerIndex]
+  if (dealer && winnerIdx !== -1) {
+    log(room, `Ronde ${room.roundNumber}: ${dealer.name} schudt en deelt, ${startingPlayer.name} begint.`)
+  } else {
+    log(room, `Ronde ${room.roundNumber} gestart. ${startingPlayer.name} begint.`)
+  }
 
   const armoeWinner = room.players.find((player) => player.eligibleArmoe)
   if (armoeWinner) {
@@ -500,6 +541,8 @@ function beginBetting(room, playerId) {
   const activePlayers = room.players.filter((p) => p.inRound && !p.passed && p.score < room.settings.maxPoints)
   if (activePlayers.length < 2) return { error: 'Niet genoeg spelers voor toep.' }
 
+  // Wie niet meegaat met déze toep, betaalt de inzet van vóór de verhoging.
+  room.game.passPenalty = room.game.currentStake
   room.game.currentStake = room.game.currentStake + 1
   room.game.toeperId = player.id
   room.game.isBetting = true
@@ -527,8 +570,9 @@ function processBet(room, playerId, choice) {
   if (choice === 'pass') {
     player.passed = true
     player.inRound = false
-    player.score += room.game.currentStake
-    log(room, `${player.name} past en krijgt ${room.game.currentStake} strafpunt(en).`)
+    const cost = room.game.passPenalty != null ? room.game.passPenalty : 1
+    player.score += cost
+    log(room, `${player.name} gaat niet mee en krijgt ${cost} strafpunt(en).`)
   } else if (choice === 'agree') {
     log(room, `${player.name} gaat mee.`)
   } else {
@@ -600,29 +644,54 @@ function grantNewHand(room, player) {
   return true
 }
 
-// Een speler claimt vuile was (mag bluffen). Anderen mogen controleren.
+function clearWash(room) {
+  const wc = room.game.washClaim
+  if (wc && wc.timer) clearTimeout(wc.timer)
+  room.game.washClaim = null
+}
+
+// Eén gedeeld venster van 10s: alle andere actieve spelers mogen tegelijk
+// controleren. Niemand binnen 10s gecontroleerd => geloofd, nieuwe kaarten.
+function startWashTimer(room) {
+  const wc = room.game.washClaim
+  if (!wc) return
+  if (wc.timer) clearTimeout(wc.timer)
+  wc.deadline = Date.now() + WASH_TIMEOUT_MS
+  wc.timer = setTimeout(() => {
+    const cur = room.game.washClaim
+    if (!cur) return
+    const claimer = getPlayer(room, cur.claimerId)
+    if (claimer) grantNewHand(room, claimer)
+    log(room, `Tijd om — niemand controleerde. ${claimer ? claimer.name : 'Speler'} krijgt nieuwe kaarten.`)
+    clearWash(room)
+    broadcastRoom(room)
+  }, WASH_TIMEOUT_MS)
+}
+
+// Een speler claimt vuile was (mag bluffen). Mag herhaald worden: nieuwe hand
+// weer vuile was? Dan opnieuw — tot de stapel op is.
 function claimWash(room, playerId) {
   if (room.phase !== 'preplay') return { error: 'Vuile was kan alleen vóór de ronde.' }
   if (!room.settings.houseDirtyWash) return { error: 'Vuile was staat uit in deze kamer.' }
   if (room.game.washClaim) return { error: 'Er loopt al een vuile-was-controle.' }
   const player = getPlayer(room, playerId)
   if (!player || player.score >= room.settings.maxPoints) return { error: 'Je kunt nu niet claimen.' }
-  if (player.washResolved) return { error: 'Je hebt je vuile was al gehad deze ronde.' }
+  if (room.game.drawPile.length < 4) return { error: 'De stapel is op — geen vuile was meer mogelijk.' }
 
-  const responders = room.players
+  const others = room.players
     .filter((p) => p.id !== playerId && p.score < room.settings.maxPoints)
     .map((p) => p.id)
 
-  if (responders.length === 0) {
+  if (others.length === 0) {
     grantNewHand(room, player)
-    player.washResolved = true
     log(room, `${player.name} claimt vuile was en krijgt nieuwe kaarten.`)
     broadcastRoom(room)
     return { ok: true }
   }
 
-  room.game.washClaim = { claimerId: playerId, responders, index: 0 }
-  log(room, `${player.name} claimt vuile was. Wie controleert?`)
+  room.game.washClaim = { claimerId: playerId, others, believers: [] }
+  log(room, `${player.name} claimt vuile was. Wie controleert? (10s)`)
+  startWashTimer(room)
   broadcastRoom(room)
   return { ok: true }
 }
@@ -630,7 +699,9 @@ function claimWash(room, playerId) {
 function respondWash(room, playerId, choice) {
   const wc = room.game.washClaim
   if (!wc) return { error: 'Er is geen vuile-was-controle.' }
-  if (wc.responders[wc.index] !== playerId) return { error: 'Het is niet jouw beurt om te reageren.' }
+  if (playerId === wc.claimerId) return { error: 'Je kunt je eigen claim niet controleren.' }
+  if (!wc.others.includes(playerId)) return { error: 'Je mag nu niet reageren.' }
+  if (wc.believers.includes(playerId)) return { error: 'Je hebt al gekozen.' }
   const claimer = getPlayer(room, wc.claimerId)
   const responder = getPlayer(room, playerId)
   if (!claimer || !responder) return { error: 'Speler niet gevonden.' }
@@ -645,19 +716,17 @@ function respondWash(room, playerId, choice) {
       claimer.score += 1
       log(room, `${responder.name} controleert — bluf! ${claimer.name} speelt met deze kaarten en krijgt +1 strafpunt.`)
     }
-    claimer.washResolved = true
-    room.game.washClaim = null
+    clearWash(room)
     broadcastRoom(room)
     return { ok: true }
   }
 
   if (choice === 'believe') {
-    wc.index += 1
-    if (wc.index >= wc.responders.length) {
+    wc.believers.push(playerId)
+    if (wc.believers.length >= wc.others.length) {
       grantNewHand(room, claimer)
-      claimer.washResolved = true
-      room.game.washClaim = null
       log(room, `Iedereen gelooft ${claimer.name} — nieuwe kaarten, geen controle.`)
+      clearWash(room)
     } else {
       log(room, `${responder.name} gelooft het.`)
     }
@@ -674,6 +743,37 @@ function fluiten(room, playerId) {
   if (countRank(player.hand, '10') !== 3) return { error: 'Je hebt geen drie tienen.' }
   log(room, `${player.name} fluit! 🤫`)
   broadcastEffect(room, { kind: 'fluiten', name: player.name })
+  return { ok: true }
+}
+
+function kickPlayer(room, hostId, targetId) {
+  if (hostId !== room.hostId) return { error: 'Alleen de host kan spelers verwijderen.' }
+  if (!targetId || targetId === hostId) return { error: 'Je kunt jezelf niet verwijderen.' }
+  if (room.game.isBetting || room.game.washClaim) {
+    return { error: 'Kan nu niet verwijderen — wacht tot de toep/controle klaar is.' }
+  }
+  const idx = room.players.findIndex((p) => p.id === targetId)
+  if (idx === -1) return { error: 'Speler niet gevonden.' }
+  const target = room.players[idx]
+
+  if (target.ws) {
+    try { send(target.ws, { type: 'kicked' }); target.ws.close() } catch (e) {}
+  }
+  room.players.splice(idx, 1)
+  log(room, `${target.name} is door de host verwijderd.`)
+
+  // Beurt herstellen als die bij de verwijderde speler lag.
+  if (room.game.currentTurnId === targetId) {
+    const next = getNextActivePlayer(room, targetId)
+    room.game.currentTurnId = next ? next.id : (room.players[0] ? room.players[0].id : null)
+  }
+  // Te weinig spelers over tijdens een potje? Terug naar de lobby.
+  if (room.players.length < 2 && room.phase !== 'lobby' && room.phase !== 'game-over') {
+    room.phase = 'lobby'
+    log(room, 'Te weinig spelers — terug naar de lobby.')
+  }
+  setHostIfNeeded(room)
+  broadcastRoom(room)
   return { ok: true }
 }
 
@@ -720,8 +820,18 @@ app.post('/api/join', (req, res) => {
   let player = getPlayer(room, playerId)
   if (!player) {
     player = createPlayer(name)
+    // Nieuwe speler start op het laagste aantal strafpunten van de groep.
+    if (room.players.length > 0) {
+      player.score = Math.min(...room.players.map((p) => p.score))
+    }
+    // Joint iemand tijdens een lopend potje? Dan zit die de huidige ronde uit
+    // en wordt vanaf de volgende ronde meegedeeld (krijgt dan kaarten).
+    if (room.phase !== 'lobby') {
+      player.inRound = false
+      player.passed = true
+    }
     room.players.push(player)
-    log(room, `${player.name} komt binnen.`)
+    log(room, `${player.name} komt binnen op ${player.score} strafpunt(en).`)
   } else {
     player.name = name
     player.connected = true
@@ -832,8 +942,15 @@ wss.on('connection', (ws, req) => {
         if (result.error) return send(ws, { type: 'error', message: result.error })
         return
       }
+      if (type === 'kickPlayer') {
+        const result = kickPlayer(room, player.id, payload && payload.targetId)
+        if (result.error) return send(ws, { type: 'error', message: result.error })
+        return
+      }
       if (type === 'nextRound') {
-        if (player.id !== room.hostId) return send(ws, { type: 'error', message: 'Alleen de host kan de volgende ronde starten.' })
+        if (player.id !== room.hostId && player.id !== room.winnerId) {
+          return send(ws, { type: 'error', message: 'Alleen de host of de winnaar kan de volgende ronde starten.' })
+        }
         if (room.phase === 'game-over') return send(ws, { type: 'error', message: 'Het spel is afgelopen.' })
         startRound(room)
         broadcastRoom(room)
@@ -851,7 +968,8 @@ wss.on('connection', (ws, req) => {
         })
         room.phase = 'lobby'
         room.roundNumber = 0
-        room.game = { dealerIndex: 0, currentTurnId: null, leadSuit: null, currentStake: 1, isBetting: false, toeperId: null, bettingOrder: [], bettingIndex: 0, trick: [], finishedTricks: [], drawPile: [], washClaim: null }
+        room.winnerId = null
+        room.game = { dealerIndex: -1, currentTurnId: null, leadSuit: null, currentStake: 1, passPenalty: 1, isBetting: false, toeperId: null, bettingOrder: [], bettingIndex: 0, trick: [], finishedTricks: [], drawPile: [], washClaim: null }
         log(room, 'Revanche gestart. Iedereen begint opnieuw bij 0 strafpunten.')
         broadcastRoom(room)
         return

@@ -8,6 +8,7 @@ const RANK_NAMES = { '10': '10', '9': '9', '8': '8', '7': '7', A: 'Aas', H: 'Kon
 const RANK_DISPLAY = { '10': '10', '9': '9', '8': '8', '7': '7', A: 'A', H: 'K', V: 'Q', B: 'J' }
 const FACE_RANKS = ['B', 'V', 'H'] // plaatjes
 const ROOM_STORAGE = 'toepen-player'
+const STATUS_LABEL = { mee: '✓ mee', wacht: 'kiest…', toept: 'toept!', uit: 'gepast' }
 
 function messageColor(text) {
   if (text.includes('toept') || text.includes('Toept')) return 'var(--accent)'
@@ -79,6 +80,7 @@ function App() {
   const [showRules, setShowRules] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [effect, setEffect] = useState(null)
+  const [, setNowTick] = useState(0)
   const wsRef = useRef(null)
   const chatEndRef = useRef(null)
   const reconnectRef = useRef(null)
@@ -118,6 +120,13 @@ function App() {
     chatEndRef.current?.scrollIntoView({ block: 'nearest' })
   }, [roomState?.chat?.length])
 
+  // Laat de vuile-was-afteller elke halve seconde aftikken.
+  useEffect(() => {
+    if (!roomState?.washClaim?.deadline) return
+    const t = setInterval(() => setNowTick((n) => n + 1), 500)
+    return () => clearInterval(t)
+  }, [roomState?.washClaim?.deadline])
+
   function savePlayer(code, id) {
     setPlayerId(id)
     setJoinCode(code)
@@ -144,6 +153,17 @@ function App() {
         if (data.type === 'state') setRoomState(data.payload)
         if (data.type === 'error') setError(data.message)
         if (data.type === 'effect') showEffect(data.payload)
+        if (data.type === 'kicked') {
+          closingRef.current = true
+          if (reconnectRef.current) clearTimeout(reconnectRef.current)
+          window.localStorage.removeItem(ROOM_STORAGE)
+          setRoomState(null)
+          setPlayerId('')
+          setJoinCode('')
+          setJoinLink('')
+          setError('Je bent door de host uit de kamer verwijderd.')
+          try { socket.close() } catch (e) {}
+        }
       } catch (e) {}
     })
     socket.addEventListener('close', () => {
@@ -258,6 +278,9 @@ function App() {
   const isHost = roomState && roomState.hostId === roomState.yourId
   const hasLeadInHand = roomState?.leadSuit && sortedHand.some((c) => c.suit === roomState.leadSuit)
   const isYourTurn = roomState && roomState.currentTurnId === roomState.yourId
+  const washSecondsLeft = roomState?.washClaim?.deadline
+    ? Math.max(0, Math.ceil((roomState.washClaim.deadline - Date.now()) / 1000))
+    : null
 
   let turnBanner = null
   if (roomState) {
@@ -296,7 +319,7 @@ function App() {
           <h2>Speluitleg</h2>
           <p>Speel met 2-8 spelers. Je krijgt 4 kaarten en er worden 4 slagen gespeeld. De winnaar van de laatste slag wint de ronde. Je moet kleur bekennen als je dat kunt.</p>
           <p>Iedereen begint op 0. Wie de ronde verliest, krijgt strafpunten gelijk aan de inzet. <strong>Toepen</strong> verhoogt de inzet met 1 (ook over jezelf heen); anderen gaan mee of passen. Wie past, neemt de huidige inzet meteen als strafpunten. Wie eerst aan het maximum komt, ligt eruit.</p>
-          <p><strong>Speciale handen:</strong> 4 dezelfde = direct gewonnen. <strong>Vuile was</strong> (een 7 + 3 plaatjes, of 4 plaatjes — J/Q/K) mag je claimen voor nieuwe kaarten; anderen mogen controleren. Klopt het → de controleur krijgt een strafpunt; was het bluf → jij speelt je kaarten en krijgt een strafpunt.</p>
+          <p><strong>Speciale handen:</strong> 4 dezelfde = direct gewonnen. <strong>Vuile was</strong> (4 plaatjes, of 3 plaatjes + een 7 — plaatjes = J/Q/K én Aas) mag je claimen voor nieuwe kaarten; anderen mogen controleren. Klopt het → de controleur krijgt een strafpunt; was het bluf → jij speelt je kaarten en krijgt een strafpunt.</p>
           <p><strong>Gimmicks:</strong> 4×10 = "op tafel". 3×10 = fluiten (🤫). Wordt de beslissende slag met een <strong>boer (J)</strong> gewonnen, dan zijn de strafpunten dubbel.</p>
         </section>
       )}
@@ -317,7 +340,7 @@ function App() {
               </select>
             </label>
             <div className="toggles">
-              <label><input type="checkbox" checked={settings.houseDirtyWash} onChange={(event) => setSettings((prev) => ({ ...prev, houseDirtyWash: event.target.checked }))} /> Vuile was (7 + 3 plaatjes of 4 plaatjes) — claimen &amp; controleren</label>
+              <label><input type="checkbox" checked={settings.houseDirtyWash} onChange={(event) => setSettings((prev) => ({ ...prev, houseDirtyWash: event.target.checked }))} /> Vuile was (4 plaatjes, of 3 + een 7; plaatjes = J/Q/K en Aas) — claimen &amp; controleren</label>
               <label><input type="checkbox" checked={settings.houseSwap} onChange={(event) => setSettings((prev) => ({ ...prev, houseSwap: event.target.checked }))} /> 3 gelijk + 1 afwijkend: verwissel één kaart</label>
               <p className="toggle-note">Vast: 4 dezelfde = direct gewonnen · 4×10 = op tafel · 3×10 = fluiten · beslissende slag met boer = dubbel.</p>
             </div>
@@ -352,8 +375,16 @@ function App() {
                     {player.name}
                     {!player.connected && <span className="offline">offline</span>}
                   </span>
+                  {player.status && <span className={`status-pill s-${player.status}`}>{STATUS_LABEL[player.status]}</span>}
                   <span className="player-info">{player.score} pt</span>
                   {player.id === roomState.hostId && <span className="tag">Host</span>}
+                  {isHost && player.id !== roomState.yourId && (
+                    <button
+                      className="kick-btn"
+                      title={`${player.name} verwijderen`}
+                      onClick={() => { if (window.confirm(`${player.name} uit de kamer verwijderen?`)) sendAction('kickPlayer', { targetId: player.id }) }}
+                    >✕</button>
+                  )}
                 </div>
               ))}
             </div>
@@ -418,7 +449,10 @@ function App() {
                   <div className="preplay-actions">
                     {roomState.washClaim ? (
                       <div className="wash-claim">
-                        <p><strong>{roomState.washClaim.claimerName}</strong> claimt vuile was. Geloof je het, of controleer je?</p>
+                        <div className="wash-claim-head">
+                          <p><strong>{roomState.washClaim.claimerName}</strong> claimt vuile was. Geloof je het, of controleer je?</p>
+                          {washSecondsLeft !== null && <span className={`wash-timer ${washSecondsLeft <= 3 ? 'urgent' : ''}`}>⏳ {washSecondsLeft}s</span>}
+                        </div>
                         {roomState.washRespond ? (
                           <div className="button-row">
                             <button className="ghost danger" onClick={() => sendAction('washRespond', { choice: 'check' })}>Controleer</button>
@@ -453,11 +487,13 @@ function App() {
                   </div>
                 )}
 
-                {roomState.phase === 'round-end' && (
-                  isHost
-                    ? <button onClick={() => sendAction('nextRound')}>Volgende ronde</button>
-                    : <p className="muted-note">Ronde klaar. Wachten op de host…</p>
-                )}
+                {roomState.phase === 'round-end' && (() => {
+                  const youWon = roomState.winnerId === roomState.yourId
+                  const winnerName = playerList.find((p) => p.id === roomState.winnerId)?.name || 'de winnaar'
+                  return (isHost || youWon)
+                    ? <button onClick={() => sendAction('nextRound')}>{youWon ? '🔀 Schudden & volgende ronde' : 'Volgende ronde'}</button>
+                    : <p className="muted-note">Ronde klaar. {winnerName} schudt…</p>
+                })()}
 
                 {roomState.phase === 'game-over' && (
                   <div className="game-over">
