@@ -453,16 +453,6 @@ function finishRound(room, winnerId, directWin, multiplier = 1) {
   }
 }
 
-function getNextActivePlayer(room, fromId) {
-  const living = room.players.filter((player) => player.score < room.settings.maxPoints)
-  const startIndex = living.findIndex((player) => player.id === fromId)
-  for (let offset = 1; offset < living.length; offset += 1) {
-    const next = living[(startIndex + offset) % living.length]
-    if (next.inRound && !next.passed) return next
-  }
-  return null
-}
-
 function validatePlay(room, player, card) {
   if (room.phase !== 'playing' || room.game.isBetting) return 'Niet in de speelmodus.'
   if (room.game.currentTurnId !== player.id) return 'Het is niet jouw beurt.'
@@ -476,11 +466,65 @@ function validatePlay(room, player, card) {
   return null
 }
 
-function determineTrickWinner(trick) {
-  const leadSuit = trick[0].card.suit
-  return trick.filter((play) => play.card.suit === leadSuit).reduce((best, play) => {
-    return play.card.order > best.card.order ? play : best
-  })
+function activePlayersInRound(room) {
+  return room.players.filter((p) => p.inRound && !p.passed && p.score < room.settings.maxPoints)
+}
+
+// Winnaar van de slag: alléén kaarten van spelers die nog meedoen tellen mee.
+// Kaarten van wie gepast heeft blijven liggen, maar kunnen niet winnen.
+function determineTrickWinner(room) {
+  const activeIds = new Set(activePlayersInRound(room).map((p) => p.id))
+  const live = room.game.trick.filter((play) => activeIds.has(play.playerId))
+  const pool = live.length ? live : room.game.trick
+  if (pool.length === 0) return null
+  const leadSuit = room.game.leadSuit || pool[0].card.suit
+  const leadPlays = pool.filter((play) => play.card.suit === leadSuit)
+  const finalPool = leadPlays.length ? leadPlays : pool
+  return finalPool.reduce((best, play) => (play.card.order > best.card.order ? play : best))
+}
+
+// Een slag is compleet als iedere nog-actieve speler een kaart in de slag heeft.
+function trickComplete(room) {
+  const active = activePlayersInRound(room)
+  if (active.length === 0) return false
+  return active.every((p) => room.game.trick.some((t) => t.playerId === p.id))
+}
+
+// Volgende actieve speler (na fromId, in zitvolgorde) die nog niet in deze slag speelde.
+function nextActiveToPlay(room, fromId) {
+  const players = room.players
+  const len = players.length
+  if (len === 0) return null
+  let startIndex = players.findIndex((p) => p.id === fromId)
+  if (startIndex === -1) startIndex = 0
+  for (let off = 1; off <= len; off += 1) {
+    const p = players[(startIndex + off) % len]
+    const isActive = p.inRound && !p.passed && p.score < room.settings.maxPoints
+    const hasPlayed = room.game.trick.some((t) => t.playerId === p.id)
+    if (isActive && !hasPlayed) return p
+  }
+  return null
+}
+
+// Rondt een volledige slag af: winnaar bepalen, opslaan, en eventueel de ronde sluiten.
+function resolveCompletedTrick(room) {
+  if (!room.game.trick.length) return
+  const winnerPlay = determineTrickWinner(room)
+  if (!winnerPlay) return
+  const winner = getPlayer(room, winnerPlay.playerId)
+  if (!winner) return
+  const completedTrick = room.game.trick
+  room.game.finishedTricks.push({ plays: completedTrick, winnerId: winner.id })
+  room.game.trick = []
+  room.game.leadSuit = null
+  room.game.currentTurnId = winner.id
+  room.game.trickNumber = (room.game.trickNumber || 0) + 1
+  log(room, `${winner.name} wint de slag met ${winnerPlay.card.label}.`)
+  const unfinishedPlayers = activePlayersInRound(room)
+  if (unfinishedPlayers.length <= 1 || room.game.trickNumber >= 4) {
+    const boerInTrick = completedTrick.some((play) => play.card.rank === 'B')
+    finishRound(room, winner.id, false, boerInTrick ? 2 : 1)
+  }
 }
 
 function playCard(room, playerId, card) {
@@ -499,33 +543,14 @@ function playCard(room, playerId, card) {
   room.game.roundHasStarted = true
   log(room, `${player.name} speelt ${playedCard.label}.`)
 
-  const activeCount = room.players.filter((p) => p.inRound && !p.passed && p.score < room.settings.maxPoints).length
-  if (room.game.trick.length < activeCount) {
-    const nextPlayer = getNextActivePlayer(room, player.id)
+  if (!trickComplete(room)) {
+    const nextPlayer = nextActiveToPlay(room, player.id)
     room.game.currentTurnId = nextPlayer ? nextPlayer.id : null
     broadcastRoom(room)
     return { ok: true }
   }
 
-  const winnerPlay = determineTrickWinner(room.game.trick)
-  const winner = getPlayer(room, winnerPlay.playerId)
-  const completedTrick = room.game.trick
-  room.game.finishedTricks.push({ plays: completedTrick, winnerId: winner.id })
-  room.game.trick = []
-  room.game.leadSuit = null
-  room.game.currentTurnId = winner.id
-  room.game.trickNumber = (room.game.trickNumber || 0) + 1
-  log(room, `${winner.name} wint de slag met ${winnerPlay.card.label}.`)
-
-  const unfinishedPlayers = room.players.filter((p) => p.inRound && !p.passed && p.score < room.settings.maxPoints)
-  if (unfinishedPlayers.length <= 1 || room.game.trickNumber >= 4) {
-    // Boer (J) in de beslissende slag (door wie dan ook gespeeld) => dubbele strafpunten.
-    const boerInTrick = completedTrick.some((play) => play.card.rank === 'B')
-    finishRound(room, winner.id, false, boerInTrick ? 2 : 1)
-    broadcastRoom(room)
-    return { ok: true }
-  }
-
+  resolveCompletedTrick(room)
   broadcastRoom(room)
   return { ok: true }
 }
@@ -574,13 +599,8 @@ function processBet(room, playerId, choice) {
     const cost = room.game.passPenalty != null ? room.game.passPenalty : 1
     player.score += cost
     log(room, `${player.name} gaat niet mee en krijgt ${cost} strafpunt(en).`)
-    // Wie niet meegaat ligt uit de ronde: haal z'n eventuele kaart uit de lopende
-    // slag. Anders zou een gepaste speler die slag/ronde nog kunnen winnen en raakt
-    // de slag-telling in de war (ronde stopt dan te vroeg).
-    if (room.game.trick.some((t) => t.playerId === player.id)) {
-      room.game.trick = room.game.trick.filter((t) => t.playerId !== player.id)
-      room.game.leadSuit = room.game.trick.length ? room.game.trick[0].card.suit : null
-    }
+    // Kaarten die al op tafel liggen blijven liggen — ze tellen alleen niet meer mee
+    // voor het winnen van de slag (zie determineTrickWinner/trickComplete).
   } else if (choice === 'agree') {
     log(room, `${player.name} gaat mee.`)
   } else {
@@ -754,29 +774,123 @@ function fluiten(room, playerId) {
   return { ok: true }
 }
 
+// Na het verwijderen van een speler tijdens het spelen: slag afronden als hij nu
+// compleet is, anders de beurt doorzetten naar de volgende actieve speler.
+function afterRemovalProgress(room, targetId) {
+  if (room.phase !== 'playing' || room.game.isBetting) return
+  const active = activePlayersInRound(room)
+  if (active.length === 0) return
+  if (room.game.trick.length && trickComplete(room)) {
+    resolveCompletedTrick(room)
+    return
+  }
+  if (room.game.currentTurnId === targetId || !getPlayer(room, room.game.currentTurnId)) {
+    const next = nextActiveToPlay(room, targetId)
+    room.game.currentTurnId = next ? next.id : (active[0] ? active[0].id : null)
+  }
+}
+
+// Verwijdert een speler en herstelt de spelstaat (toepronde, vuile was, beurt).
+// Kaarten die al op tafel liggen blijven liggen (tellen niet mee voor het winnen).
+function removePlayerFromRoom(room, target) {
+  const targetId = target.id
+  const nextAfterTarget = nextActiveToPlay(room, targetId)
+
+  // Vuile-was-controle opschonen.
+  const wc = room.game.washClaim
+  if (wc) {
+    if (wc.claimerId === targetId) {
+      clearWash(room)
+    } else {
+      wc.others = wc.others.filter((id) => id !== targetId)
+      wc.believers = wc.believers.filter((id) => id !== targetId)
+    }
+  }
+
+  // Toepronde opschonen.
+  let cancelToep = false
+  if (room.game.isBetting) {
+    if (room.game.toeperId === targetId) {
+      cancelToep = true
+    } else {
+      const pos = room.game.bettingOrder.indexOf(targetId)
+      if (pos !== -1) {
+        room.game.bettingOrder.splice(pos, 1)
+        if (pos < room.game.bettingIndex) room.game.bettingIndex -= 1
+      }
+    }
+  }
+
+  // Speler weghalen.
+  const idx = room.players.findIndex((p) => p.id === targetId)
+  if (idx !== -1) room.players.splice(idx, 1)
+
+  // Vuile was afronden als er niemand meer te controleren is, of iedereen gelooft.
+  if (room.game.washClaim) {
+    const w = room.game.washClaim
+    const claimer = getPlayer(room, w.claimerId)
+    if (claimer && w.believers.length >= w.others.length) {
+      grantNewHand(room, claimer)
+      log(room, `${claimer.name} krijgt nieuwe kaarten.`)
+      clearWash(room)
+    }
+  }
+
+  // Toepronde hervatten of afronden.
+  if (room.game.isBetting) {
+    if (cancelToep) {
+      room.game.isBetting = false
+      room.game.bettingOrder = []
+      room.game.bettingIndex = 0
+      room.game.toeperId = null
+      room.game.currentTurnId = nextAfterTarget ? nextAfterTarget.id : null
+      log(room, 'De toep vervalt (toeper verwijderd).')
+    } else {
+      const remaining = room.game.bettingOrder.slice(room.game.bettingIndex).filter((id) => {
+        const p = getPlayer(room, id)
+        return p && p.score < room.settings.maxPoints
+      })
+      if (remaining.length > 0) {
+        room.game.currentTurnId = remaining[0]
+      } else {
+        room.game.isBetting = false
+        room.game.bettingOrder = []
+        room.game.bettingIndex = 0
+        const toeper = getPlayer(room, room.game.toeperId)
+        const act = activePlayersInRound(room)
+        if (act.length === 1) {
+          finishRound(room, act[0].id, true)
+          return
+        }
+        room.game.currentTurnId = toeper ? toeper.id : (act[0] ? act[0].id : null)
+      }
+    }
+  }
+
+  // Tijdens het spelen: slag afronden of beurt doorzetten.
+  if (room.phase === 'playing' && !room.game.isBetting) {
+    afterRemovalProgress(room, targetId)
+  }
+}
+
 function kickPlayer(room, hostId, targetId) {
   if (hostId !== room.hostId) return { error: 'Alleen de host kan spelers verwijderen.' }
   if (!targetId || targetId === hostId) return { error: 'Je kunt jezelf niet verwijderen.' }
-  if (room.game.isBetting || room.game.washClaim) {
-    return { error: 'Kan nu niet verwijderen — wacht tot de toep/controle klaar is.' }
-  }
-  const idx = room.players.findIndex((p) => p.id === targetId)
-  if (idx === -1) return { error: 'Speler niet gevonden.' }
-  const target = room.players[idx]
+  const target = room.players.find((p) => p.id === targetId)
+  if (!target) return { error: 'Speler niet gevonden.' }
 
   if (target.ws) {
     try { send(target.ws, { type: 'kicked' }); target.ws.close() } catch (e) {}
   }
-  room.players.splice(idx, 1)
+  if (target.disconnectTimer) { clearTimeout(target.disconnectTimer); target.disconnectTimer = null }
+
+  removePlayerFromRoom(room, target)
   log(room, `${target.name} is door de host verwijderd.`)
 
-  // Beurt herstellen als die bij de verwijderde speler lag.
-  if (room.game.currentTurnId === targetId) {
-    const next = getNextActivePlayer(room, targetId)
-    room.game.currentTurnId = next ? next.id : (room.players[0] ? room.players[0].id : null)
-  }
   // Te weinig spelers over tijdens een potje? Terug naar de lobby.
   if (room.players.length < 2 && room.phase !== 'lobby' && room.phase !== 'game-over') {
+    clearWash(room)
+    room.game.isBetting = false
     room.phase = 'lobby'
     log(room, 'Te weinig spelers — terug naar de lobby.')
   }
