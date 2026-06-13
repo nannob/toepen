@@ -254,6 +254,12 @@ function App() {
     effectTimerRef.current = setTimeout(() => setEffect(null), 2000)
   }
 
+  function restartGame() {
+    if (window.confirm('Het spel nu opnieuw starten? Alle scores gaan terug naar 0.')) {
+      sendAction('restartGame')
+    }
+  }
+
   function leaveRoom() {
     closingRef.current = true
     if (reconnectRef.current) clearTimeout(reconnectRef.current)
@@ -303,7 +309,7 @@ function App() {
   if (roomState) {
     if (roomState.phase === 'preplay') {
       turnBanner = roomState.washClaim
-        ? { mine: roomState.washRespond, text: `${roomState.washClaim.claimerName} claimt vuile was` }
+        ? { mine: roomState.washRespond, text: `${roomState.washClaim.claimerName} claimt vuile was — nog ${washSecondsLeft ?? 10}s` }
         : { mine: false, text: 'Vóór de ronde — claim eventueel vuile was. Host start de ronde.' }
     } else if (roomState.phase === 'playing') {
       if (roomState.betting) {
@@ -330,6 +336,16 @@ function App() {
           <button className="help-button" onClick={() => setShowRules((value) => !value)}>{showRules ? 'Verberg regels' : 'Regels'}</button>
         </div>
       </header>
+
+      {roomState?.washClaim && washSecondsLeft !== null && (
+        <div className={`wash-countdown ${washSecondsLeft <= 3 ? 'urgent' : ''}`}>
+          <span className="wash-countdown-num">{washSecondsLeft}</span>
+          <div className="wash-countdown-text">
+            <strong>{roomState.washClaim.claimerName}</strong> claimt vuile was
+            <span>{roomState.washRespond ? 'Controleer of geloof het' : 'Wachten op de controle…'}</span>
+          </div>
+        </div>
+      )}
 
       {showRules && (
         <section className="card rules">
@@ -379,6 +395,9 @@ function App() {
                 <p>{statusText}</p>
               </div>
               <div className="room-header-actions">
+                {isHost && ['preplay', 'playing', 'round-end'].includes(roomState.phase) && (
+                  <button className="ghost danger" onClick={restartGame}>↻ Opnieuw</button>
+                )}
                 <button className="ghost" onClick={copyLink}>{copied ? 'Gekopieerd ✓' : 'Kopieer link'}</button>
                 <button className="ghost" onClick={leaveRoom}>Verlaten</button>
               </div>

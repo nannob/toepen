@@ -574,6 +574,13 @@ function processBet(room, playerId, choice) {
     const cost = room.game.passPenalty != null ? room.game.passPenalty : 1
     player.score += cost
     log(room, `${player.name} gaat niet mee en krijgt ${cost} strafpunt(en).`)
+    // Wie niet meegaat ligt uit de ronde: haal z'n eventuele kaart uit de lopende
+    // slag. Anders zou een gepaste speler die slag/ronde nog kunnen winnen en raakt
+    // de slag-telling in de war (ronde stopt dan te vroeg).
+    if (room.game.trick.some((t) => t.playerId === player.id)) {
+      room.game.trick = room.game.trick.filter((t) => t.playerId !== player.id)
+      room.game.leadSuit = room.game.trick.length ? room.game.trick[0].card.suit : null
+    }
   } else if (choice === 'agree') {
     log(room, `${player.name} gaat mee.`)
   } else {
@@ -955,6 +962,26 @@ wss.on('connection', (ws, req) => {
           return send(ws, { type: 'error', message: 'Alleen de host of de winnaar kan de volgende ronde starten.' })
         }
         if (room.phase === 'game-over') return send(ws, { type: 'error', message: 'Het spel is afgelopen.' })
+        startRound(room)
+        broadcastRoom(room)
+        return
+      }
+      if (type === 'restartGame') {
+        if (player.id !== room.hostId) return send(ws, { type: 'error', message: 'Alleen de host kan opnieuw starten.' })
+        if (room.players.length < 2) return send(ws, { type: 'error', message: 'Minimaal twee spelers nodig.' })
+        clearWash(room)
+        room.players.forEach((p) => {
+          p.score = 0
+          p.inRound = true
+          p.passed = false
+          p.swapped = false
+          p.dirtyWashUsed = false
+          p.washResolved = false
+        })
+        room.winnerId = null
+        room.roundNumber = 0
+        room.game.dealerIndex = -1
+        log(room, `${player.name} start het spel opnieuw. Iedereen begint bij 0.`)
         startRound(room)
         broadcastRoom(room)
         return

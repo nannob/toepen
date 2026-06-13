@@ -533,6 +533,40 @@ button.ghost:active { transform: translateY(1px); }
 
 .toggle-note { margin: 2px 0 0; font-size: 0.78rem; color: var(--muted); line-height: 1.4; }
 
+/* Prominente vuile-was-aftelling (altijd in beeld) */
+.wash-countdown {
+  position: sticky;
+  top: 8px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 14px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(251, 191, 36, 0.22), rgba(245, 158, 11, 0.16));
+  border: 1px solid rgba(251, 191, 36, 0.5);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+}
+.wash-countdown-num {
+  flex-shrink: 0;
+  min-width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  font-size: 1.8rem;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: #1a1206;
+  background: #fcd34d;
+  border-radius: 14px;
+}
+.wash-countdown-text { display: grid; gap: 1px; font-size: 0.95rem; }
+.wash-countdown-text span { color: var(--muted); font-size: 0.82rem; }
+.wash-countdown.urgent { border-color: rgba(248, 113, 113, 0.7); animation: pulse 0.9s infinite; }
+.wash-countdown.urgent .wash-countdown-num { background: #fca5a5; }
+
 /* Effect-overlay (fluiten / op tafel) */
 .effect-overlay {
   position: fixed;
